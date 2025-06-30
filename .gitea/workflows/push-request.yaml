@@ -1,0 +1,40 @@
+name: Pull Request Workflow
+on:
+  pull_request:
+    types: [opened, synchronize]
+    branches:
+      - master
+      - "*/*"
+
+# Caching proxy
+env:
+  http_proxy: ${{ vars.HTTP_PROXY }} 
+  https_proxy: ${{ vars.HTTP_PROXY }} 
+
+jobs:
+  build:
+    runs-on: rust-stm32
+    steps:
+      - name: Install root certificate
+        run: |
+          mkdir -p /usr/share/ca-certificates/extra
+          echo "${{ vars.SCTB_ROOT_CERT }}" > /usr/share/ca-certificates/extra/sctb.crt
+          echo "extra/sctb.crt" >> /etc/ca-certificates.conf
+          update-ca-certificates
+
+      - name: Install Protoc
+        uses: arduino/setup-protoc@v3
+
+      - name: Install flip-link
+        run: cargo install flip-link@0.1.9
+      
+      - name: Clone
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build different features
+        run: |
+          cargo build --release
+          cargo build --release --features "auto-pll"
+          cargo build --release --features "auto-pll,display"

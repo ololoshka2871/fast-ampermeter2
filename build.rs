@@ -1,5 +1,6 @@
-use std::path::PathBuf;
 /*
+use std::path::PathBuf;
+
 static PROTOBUF_FILE: &str = "ProtobufDevice_0000E110.proto";
 static PROTOBUF_DIR: &str = "src/protobuf/proto";
 

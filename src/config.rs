@@ -4,7 +4,7 @@
 pub const XTAL_FREQ: u32 = 8_000_000;
 
 // System clock trate
-pub const SYST_CLOCK_HZ: u32 = 48_000_000;
+pub const SYST_CLOCK_HZ: u32 = 72_000_000;
 
 // System timer rate
 pub const SYST_TIMER_HZ: u32 = 1_000;

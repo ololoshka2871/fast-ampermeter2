@@ -11,7 +11,7 @@
             "name": "cortex-debug (Debug)",
             "type": "cortex-debug",
             "cwd": "${workspaceRoot}",
-            "executable": "./target/thumbv7m-none-eabi/debug/rk-meter-agc-pll", // бинарь
+            "executable": "./target/thumbv7m-none-eabi/debug/fast-ampermeter2", // бинарь
             "request": "attach", // позволяет не прошивать таргет при запуске
             "svdFile": "STM32F103.svd",
             "servertype": "external", // Подключиться к внешнему отладочному интерфейсу
@@ -28,7 +28,7 @@
             "name": "cortex-debug (Release)",
             "type": "cortex-debug",
             "cwd": "${workspaceRoot}",
-            "executable": "./target/thumbv7m-none-eabi/release/rk-meter-agc-pll", // бинарь
+            "executable": "./target/thumbv7m-none-eabi/release/fast-ampermeter2", // бинарь
             "request": "attach", // позволяет не прошивать таргет при запуске
             "svdFile": "STM32F103.svd",
             "servertype": "external", // Подключиться к внешнему отладочному интерфейсу

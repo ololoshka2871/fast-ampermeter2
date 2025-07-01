@@ -16,7 +16,7 @@ use stm32f1xx_hal::dma::{CircBuffer, CircReadDma, DmaExt, RxDma};
 use stm32f1xx_hal::flash::FlashExt;
 use stm32f1xx_hal::gpio::{Analog, GpioExt, PA0, PA1};
 
-use stm32f1xx_hal::pac::{adc1, ADC1};
+use stm32f1xx_hal::pac::{adc1, Interrupt, ADC1};
 use stm32f1xx_hal::rcc::RccExt;
 use stm32f1xx_hal::usb::{Peripheral, UsbBus, UsbBusType};
 
@@ -28,10 +28,11 @@ use usb_device::prelude::{UsbDevice, UsbDeviceBuilder};
 
 use rtic::app;
 use rtic_monotonics::systick::prelude::*;
+use rtic_sync::channel::{Receiver, Sender};
 
 //-----------------------------------------------------------------------------
 
-systick_monotonic!(Mono, config::SYST_CLOCK_HZ);
+systick_monotonic!(Mono, config::SYST_TIMER_HZ);
 
 //-----------------------------------------------------------------------------
 
@@ -85,6 +86,14 @@ type AdcPinsMS = AdcPins<128>;
 mod app {
     use super::*;
 
+    type AdcTransferBuffer = CircBuffer<
+        [u16; AdcPinsMS::buf_size()],
+        RxDma<
+            AdcPayload<stm32f1xx_hal::pac::ADC1, AdcPinsMS, stm32f1xx_hal::adc::Scan>,
+            stm32f1xx_hal::dma::dma1::C1,
+        >,
+    >;
+
     #[shared]
     struct Shared {
         sample_buffer: heapless::Vec<u8, AUDIO_EP_SIZE_MAX>,
@@ -94,13 +103,10 @@ mod app {
     struct Local {
         usb_audio: usbd_audio::AudioClass<'static, UsbBus<Peripheral>>,
         usb_device: UsbDevice<'static, UsbBusType>,
-        adc_transfer: CircBuffer<
-            [u16; AdcPinsMS::buf_size()],
-            RxDma<
-                AdcPayload<stm32f1xx_hal::pac::ADC1, AdcPinsMS, stm32f1xx_hal::adc::Scan>,
-                stm32f1xx_hal::dma::dma1::C1,
-            >,
-        >,
+        adc_transfer: AdcTransferBuffer,
+        tx1: Sender<'static, Interrupt, 10>,
+        tx2: Sender<'static, Interrupt, 10>,
+        usb_awake_rx: Receiver<'static, Interrupt, 10>,
     }
 
     #[init]
@@ -237,6 +243,7 @@ mod app {
         defmt::info!("\tADC");
 
         let sample_buffer = heapless::Vec::<u8, AUDIO_EP_SIZE_MAX>::new();
+        let (usb_awake_tx, usb_awake_rx) = rtic_sync::make_channel!(Interrupt, 10);
 
         defmt::info!("Buffers ready");
 
@@ -249,6 +256,8 @@ mod app {
 
         //---------------------------------------------------------------------
 
+        usb::spawn().ok();
+
         defmt::info!("Init done");
 
         //---------------------------------------------------------------------
@@ -259,42 +268,62 @@ mod app {
                 usb_audio,
                 usb_device: usb_dev,
                 adc_transfer,
+                usb_awake_rx,
+                tx1: usb_awake_tx.clone(),
+                tx2: usb_awake_tx,
             },
         )
     }
 
     //-------------------------------------------------------------------------
 
-    #[task(binds = USB_HP_CAN_TX, priority = 4)]
-    fn usb_tx(_ctx: usb_tx::Context) {
-        usb::spawn().ok();
+    #[task(binds = USB_HP_CAN_TX, local = [tx1], priority = 4)]
+    fn usb_tx(ctx: usb_tx::Context) {
+        if ctx.local.tx1.try_send(Interrupt::USB_HP_CAN_TX).is_err() {
+            defmt::error!("USB awake queue full");
+        } else {
+            // disable USB tx interrupt
+            cortex_m::peripheral::NVIC::mask(Interrupt::USB_HP_CAN_TX);
+        }
     }
 
-    #[task(binds = USB_LP_CAN_RX0, priority = 4)]
-    fn usb_rx0(_ctx: usb_rx0::Context) {
-        usb::spawn().ok();
+    #[task(binds = USB_LP_CAN_RX0, local = [tx2], priority = 4)]
+    fn usb_rx0(ctx: usb_rx0::Context) {
+        if ctx.local.tx2.try_send(Interrupt::USB_LP_CAN_RX0).is_err() {
+            defmt::error!("USB awake queue full");
+        } else {
+            // disable USB rx interrupt
+            cortex_m::peripheral::NVIC::mask(Interrupt::USB_LP_CAN_RX0);
+        }
     }
 
-    #[task(shared = [sample_buffer], local = [usb_audio, usb_device], priority = 4)]
+    #[task(shared = [sample_buffer], local = [usb_audio, usb_device, usb_awake_rx], priority = 4)]
     async fn usb(ctx: usb::Context) {
         let usb_device = ctx.local.usb_device;
         let usb_audio = ctx.local.usb_audio;
+        let usb_awake_rx = ctx.local.usb_awake_rx;
 
         let mut sample_buffer = ctx.shared.sample_buffer;
 
-        sample_buffer.lock(|sample_buffer| {
-            let send_buf = if sample_buffer.is_empty() {
-                &[0, 0, 0, 0] // получив это, хост следующий опрос устройство зажержит на ~4 мс.
-            } else {
-                sample_buffer.as_slice()
-            };
+        loop {
+            if let Ok(interrupt) = usb_awake_rx.recv().await {
+                sample_buffer.lock(|sample_buffer| {
+                    let send_buf = if sample_buffer.is_empty() {
+                        &[0, 0, 0, 0] // получив это, хост следующий опрос устройство зажержит на ~4 мс.
+                    } else {
+                        sample_buffer.as_slice()
+                    };
 
-            if usb_audio.write(send_buf).is_ok() || sample_buffer.is_full() {
-                sample_buffer.clear();
+                    if usb_audio.write(send_buf).is_ok() || sample_buffer.is_full() {
+                        sample_buffer.clear();
+                    }
+                });
+
+                while usb_device.poll(&mut [usb_audio]) {}
+
+                unsafe { cortex_m::peripheral::NVIC::unmask(interrupt) };
             }
-        });
-
-        while usb_device.poll(&mut [usb_audio]) {}
+        }
     }
 
     #[task(binds = DMA1_CHANNEL1, shared = [sample_buffer], local = [adc_transfer], priority = 2)]
@@ -314,6 +343,17 @@ mod app {
 
         if let Err(e) = result {
             defmt::error!("ADC DMA irq error: {}", defmt::Debug2Format(&e));
+
+            unsafe {
+                #[allow(invalid_value)]
+                let mut fake_transfer =
+                    core::mem::MaybeUninit::<AdcTransferBuffer>::zeroed().assume_init();
+                core::mem::swap(&mut fake_transfer, adc_transfer);
+                let (data, channel) = fake_transfer.stop();
+                let mut new_transfer = channel.circ_read(data);
+                core::mem::swap(adc_transfer, &mut new_transfer);
+                core::mem::forget(new_transfer);
+            }
         }
     }
 }

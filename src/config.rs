@@ -21,4 +21,4 @@ pub const HEAP_SIZE: usize = 2048;
 
 //-----------------------------------------------------------------------------
 
-pub const DISCRETISATION_RATE: u32 = 44_100;
+pub const DISCRETISATION_RATE: u32 = 48_000;

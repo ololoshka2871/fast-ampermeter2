@@ -28,7 +28,6 @@ use usb_device::prelude::{UsbDevice, UsbDeviceBuilder};
 
 use rtic::app;
 use rtic_monotonics::systick::prelude::*;
-use rtic_sync::channel::{Receiver, Sender};
 
 //-----------------------------------------------------------------------------
 
@@ -77,8 +76,8 @@ impl<const MS: usize> SetChannels<AdcPins<MS>> for Adc<ADC1> {
     }
 }
 
-// use multisempling 128
-type AdcPinsMS = AdcPins<128>;
+// use multisampling 1
+type AdcPinsMS = AdcPins<1>;
 
 //-----------------------------------------------------------------------------
 
@@ -97,19 +96,16 @@ mod app {
     #[shared]
     struct Shared {
         sample_buffer: heapless::Vec<u8, AUDIO_EP_SIZE_MAX>,
+        usb_audio: usbd_audio::AudioClass<'static, UsbBus<Peripheral>>,
+        usb_device: UsbDevice<'static, UsbBusType>,
     }
 
     #[local]
     struct Local {
-        usb_audio: usbd_audio::AudioClass<'static, UsbBus<Peripheral>>,
-        usb_device: UsbDevice<'static, UsbBusType>,
         adc_transfer: AdcTransferBuffer,
-        tx1: Sender<'static, Interrupt, 10>,
-        tx2: Sender<'static, Interrupt, 10>,
-        usb_awake_rx: Receiver<'static, Interrupt, 10>,
     }
 
-    #[init]
+    #[init(local = [usb_bus: Option<usb_device::bus::UsbBusAllocator<UsbBusType>> = None])]
     fn init(mut ctx: init::Context) -> (Shared, Local) {
         defmt::info!("Init...");
 
@@ -156,7 +152,7 @@ mod app {
             // will not reset your device when you upload new firmware.
             let mut usb_dp = gpioa.pa12.into_push_pull_output(&mut gpioa.crh);
             usb_dp.set_low();
-            cortex_m::asm::delay(10000);
+            cortex_m::asm::delay(50000);
 
             (None, usb_dp)
         };
@@ -169,12 +165,8 @@ mod app {
             pin_dp: usb_dp.into_floating_input(&mut gpioa.crh),
         };
 
-        let usb_bus = unsafe {
-            cortex_m::singleton!(
-                : usb_device::bus::UsbBusAllocator<UsbBus<Peripheral>> = UsbBus::new(usb)
-            )
-            .unwrap_unchecked()
-        };
+        ctx.local.usb_bus.replace(UsbBus::new(usb));
+        let usb_bus = ctx.local.usb_bus.as_ref().unwrap();
 
         let usb_audio = {
             use drivers::AudioStreamConfigExt;
@@ -186,7 +178,7 @@ mod app {
                         2,
                         &[config::DISCRETISATION_RATE],
                         // or ExtSpdifConnector, (ExtLineConnector, ExtLegacyAudioConnector, Ext1394*)
-                        usbd_audio::TerminalType::ExtSpdifConnector,
+                        usbd_audio::TerminalType::ExtLineConnector,
                     )
                     .unwrap()
                     .set_ep_size(AUDIO_EP_SIZE_MAX as u16), // это костыль!
@@ -195,15 +187,13 @@ mod app {
                 .unwrap()
         };
 
-        // fixme
         let usb_dev =
-            UsbDeviceBuilder::new(usb_bus, usb_device::prelude::UsbVidPid(0x0483, 0x3917))
-                .strings(&[
-                    usb_device::device::StringDescriptors::new(usb_device::LangID::RU_RU)
-                        .manufacturer("SCTBElpa")
-                        .product("rk-meter-agc-pll")
-                        .serial_number(stm32_device_signature::device_id_hex()),
-                ])
+            UsbDeviceBuilder::new(usb_bus, usb_device::prelude::UsbVidPid(0x0483, 0x5F23))
+                .composite_with_iads()
+                .strings(&[usb_device::device::StringDescriptors::default()
+                    .manufacturer("Lolka_097")
+                    .product("fast-ampermeter2")
+                    .serial_number(stm32_device_signature::device_id_hex())])
                 .unwrap()
                 .build();
 
@@ -243,7 +233,6 @@ mod app {
         defmt::info!("\tADC");
 
         let sample_buffer = heapless::Vec::<u8, AUDIO_EP_SIZE_MAX>::new();
-        let (usb_awake_tx, usb_awake_rx) = rtic_sync::make_channel!(Interrupt, 10);
 
         defmt::info!("Buffers ready");
 
@@ -256,74 +245,60 @@ mod app {
 
         //---------------------------------------------------------------------
 
-        usb::spawn().ok();
-
         defmt::info!("Init done");
 
         //---------------------------------------------------------------------
 
         (
-            Shared { sample_buffer },
-            Local {
+            Shared {
+                sample_buffer,
                 usb_audio,
                 usb_device: usb_dev,
-                adc_transfer,
-                usb_awake_rx,
-                tx1: usb_awake_tx.clone(),
-                tx2: usb_awake_tx,
             },
+            Local { adc_transfer },
         )
     }
 
     //-------------------------------------------------------------------------
 
-    #[task(binds = USB_HP_CAN_TX, local = [tx1], priority = 4)]
+    #[task(binds = USB_HP_CAN_TX, shared = [usb_device, usb_audio, sample_buffer], priority = 4)]
     fn usb_tx(ctx: usb_tx::Context) {
-        if ctx.local.tx1.try_send(Interrupt::USB_HP_CAN_TX).is_err() {
-            defmt::error!("USB awake queue full");
-        } else {
-            // disable USB tx interrupt
-            cortex_m::peripheral::NVIC::mask(Interrupt::USB_HP_CAN_TX);
-        }
+        let usb_device = ctx.shared.usb_device;
+        let usb_audio = ctx.shared.usb_audio;
+        let sample_buffer = ctx.shared.sample_buffer;
+
+        (usb_device, usb_audio, sample_buffer).lock(|usb_device, usb_audio, sample_buffer| {
+            usb_poll(usb_device, usb_audio, sample_buffer);
+        });
     }
 
-    #[task(binds = USB_LP_CAN_RX0, local = [tx2], priority = 4)]
+    #[task(binds = USB_LP_CAN_RX0, shared = [usb_device, usb_audio, sample_buffer], priority = 4)]
     fn usb_rx0(ctx: usb_rx0::Context) {
-        if ctx.local.tx2.try_send(Interrupt::USB_LP_CAN_RX0).is_err() {
-            defmt::error!("USB awake queue full");
-        } else {
-            // disable USB rx interrupt
-            cortex_m::peripheral::NVIC::mask(Interrupt::USB_LP_CAN_RX0);
-        }
+        let usb_device = ctx.shared.usb_device;
+        let usb_audio = ctx.shared.usb_audio;
+        let sample_buffer = ctx.shared.sample_buffer;
+
+        (usb_device, usb_audio, sample_buffer).lock(|usb_device, usb_audio, sample_buffer| {
+            usb_poll(usb_device, usb_audio, sample_buffer);
+        });
     }
 
-    #[task(shared = [sample_buffer], local = [usb_audio, usb_device, usb_awake_rx], priority = 4)]
-    async fn usb(ctx: usb::Context) {
-        let usb_device = ctx.local.usb_device;
-        let usb_audio = ctx.local.usb_audio;
-        let usb_awake_rx = ctx.local.usb_awake_rx;
+    fn usb_poll<B: usb_device::bus::UsbBus>(
+        usb_device: &mut UsbDevice<'static, B>,
+        usb_audio: &mut usbd_audio::AudioClass<'static, B>,
+        sample_buffer: &mut heapless::Vec<u8, AUDIO_EP_SIZE_MAX>,
+    ) {
+        let send_buf = if sample_buffer.is_empty() {
+            [0, 0, 0, 0].as_slice() // получив это, хост следующий опрос устройство зажержит на ~4 мс.
+        } else {
+            sample_buffer.as_slice()
+        };
 
-        let mut sample_buffer = ctx.shared.sample_buffer;
-
-        loop {
-            if let Ok(interrupt) = usb_awake_rx.recv().await {
-                sample_buffer.lock(|sample_buffer| {
-                    let send_buf = if sample_buffer.is_empty() {
-                        &[0, 0, 0, 0] // получив это, хост следующий опрос устройство зажержит на ~4 мс.
-                    } else {
-                        sample_buffer.as_slice()
-                    };
-
-                    if usb_audio.write(send_buf).is_ok() || sample_buffer.is_full() {
-                        sample_buffer.clear();
-                    }
-                });
-
-                while usb_device.poll(&mut [usb_audio]) {}
-
-                unsafe { cortex_m::peripheral::NVIC::unmask(interrupt) };
-            }
+        if usb_audio.write(send_buf).is_ok() || sample_buffer.is_full() {
+            sample_buffer.clear();
         }
+
+        usb_device.poll(&mut [usb_audio]);
     }
 
     #[task(binds = DMA1_CHANNEL1, shared = [sample_buffer], local = [adc_transfer], priority = 2)]
@@ -333,27 +308,28 @@ mod app {
 
         let result = sample_buffer.lock(|sample_buffer| {
             adc_transfer.peek(|buff, _half| {
-                sample_buffer
-                    .extend_from_slice(unsafe {
-                        core::slice::from_raw_parts(buff.as_ptr() as *const u8, buff.len())
-                    })
-                    .ok();
+                sample_buffer.extend_from_slice(unsafe {
+                    core::slice::from_raw_parts(buff.as_ptr() as *const u8, buff.len())
+                })
             })
         });
 
-        if let Err(e) = result {
-            defmt::error!("ADC DMA irq error: {}", defmt::Debug2Format(&e));
-
-            unsafe {
-                #[allow(invalid_value)]
-                let mut fake_transfer =
-                    core::mem::MaybeUninit::<AdcTransferBuffer>::zeroed().assume_init();
-                core::mem::swap(&mut fake_transfer, adc_transfer);
-                let (data, channel) = fake_transfer.stop();
-                let mut new_transfer = channel.circ_read(data);
-                core::mem::swap(adc_transfer, &mut new_transfer);
-                core::mem::forget(new_transfer);
+        match result {
+            Ok(Err(_)) => rtic::pend(Interrupt::USB_HP_CAN_TX),
+            Err(e) => {
+                defmt::error!("ADC DMA irq error: {}", defmt::Debug2Format(&e));
+                unsafe {
+                    #[allow(invalid_value)]
+                    let mut fake_transfer =
+                        core::mem::MaybeUninit::<AdcTransferBuffer>::zeroed().assume_init();
+                    core::mem::swap(&mut fake_transfer, adc_transfer);
+                    let (data, channel) = fake_transfer.stop();
+                    let mut new_transfer = channel.circ_read(data);
+                    core::mem::swap(adc_transfer, &mut new_transfer);
+                    core::mem::forget(new_transfer);
+                }
             }
+            _ => (),
         }
     }
 }

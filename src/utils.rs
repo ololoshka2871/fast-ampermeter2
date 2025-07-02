@@ -1,7 +1,7 @@
 /// from usb_audio/src/lib.rs
 /// calculate ISO endpoint size from format, channels and rates
 pub const fn ep_size(format: usbd_audio::Format, channels: u8, max_rate: u32) -> usize {
-    const MAX_ISO_EP_SIZE: u32 = 1023;
+    const MAX_ISO_EP_SIZE: u32 = 1023; // not a public constant in usbd_audio
 
     let octets_per_frame = channels as u32
         * match format {

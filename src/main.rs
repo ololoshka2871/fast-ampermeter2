@@ -12,11 +12,12 @@ use defmt_rtt as _; // global logger
 use panic_abort as _;
 
 use stm32f1xx_hal::adc::{self, Adc, AdcPayload, ChannelTimeSequence, SampleTime, SetChannels};
+use stm32f1xx_hal::afio::AfioExt;
 use stm32f1xx_hal::dma::{CircBuffer, CircReadDma, DmaExt, RxDma};
 use stm32f1xx_hal::flash::FlashExt;
-use stm32f1xx_hal::gpio::{Analog, GpioExt, PA0, PA1};
+use stm32f1xx_hal::gpio::{Analog, GpioExt, Output, PushPull, PA0, PA1, PB12, PB13, PB14, PB15};
 
-use stm32f1xx_hal::pac::{adc1, Interrupt, ADC1};
+use stm32f1xx_hal::pac::{adc1, ADC1};
 use stm32f1xx_hal::rcc::RccExt;
 use stm32f1xx_hal::usb::{Peripheral, UsbBus, UsbBusType};
 
@@ -43,6 +44,17 @@ const AUDIO_EP_SIZE: usize =
     utils::ep_size(usbd_audio::Format::S16le, 2, config::DISCRETISATION_RATE); // 44 семпла -> 176 байт
 const AUDIO_EP_SIZE_MAX: usize = AUDIO_EP_SIZE * 2;
 
+const TEST_TABLE: [i16; 96] = [
+    0, 32700, 4268, 32420, 8463, 31586, 12514, 30211, 16350, 28319, 19906, 25943, 23122, 23122,
+    25943, 19906, 28319, 16350, 30211, 12514, 31586, 8463, 32420, 4268, 32700, 0, 32420, -4268,
+    31586, -8463, 30211, -12514, 28319, -16350, 25943, -19906, 23122, -23122, 19906, -25943, 16350,
+    -28319, 12514, -30211, 8463, -31586, 4268, -32420, 0, -32700, -4268, -32420, -8463, -31586,
+    -12514, -30211, -16350, -28319, -19906, -25943, -23122, -23122, -25943, -19906, -28319, -16350,
+    -30211, -12514, -31586, -8463, -32420, -4268, -32700, 0, -32420, 4268, -31586, 8463, -30211,
+    12514, -28319, 16350, -25943, 19906, -23122, 23122, -19906, 25943, -16350, 28319, -12514,
+    30211, -8463, 31586, -4268, 32420,
+];
+
 pub struct AdcPins<const MS: usize>(PA0<Analog>, PA1<Analog>);
 
 impl<const MS: usize> AdcPins<MS> {
@@ -66,18 +78,19 @@ impl<const MS: usize> AdcPins<MS> {
 impl<const MS: usize> SetChannels<AdcPins<MS>> for Adc<ADC1> {
     fn set_samples(&mut self) {
         AdcPins::<MS>::cahnnels().iter().for_each(|&ch| {
-            self.set_channel_sample_time(ch, SampleTime::T_239);
+            self.set_channel_sample_time(ch, SampleTime::T_7);
         });
     }
 
     fn set_sequence(&mut self) {
         self.set_regular_sequence(&AdcPins::<MS>::cahnnels());
-        self.set_continuous_mode(true);
+        // на 1 старт свполнить MS конвертаций и остановиться
+        self.set_discontinuous_mode(Some(1));
     }
 }
 
 // use multisampling 1
-type AdcPinsMS = AdcPins<1>;
+type AdcPinsMS = AdcPins<{ config::DISCRETISATION_RATE as usize / 1000 }>;
 
 //-----------------------------------------------------------------------------
 
@@ -95,7 +108,6 @@ mod app {
 
     #[shared]
     struct Shared {
-        sample_buffer: heapless::Vec<u8, AUDIO_EP_SIZE_MAX>,
         usb_audio: usbd_audio::AudioClass<'static, UsbBus<Peripheral>>,
         usb_device: UsbDevice<'static, UsbBusType>,
     }
@@ -103,6 +115,10 @@ mod app {
     #[local]
     struct Local {
         adc_transfer: AdcTransferBuffer,
+        t1: PB12<Output<PushPull>>,
+        t2: PB13<Output<PushPull>>,
+        t3: PB14<Output<PushPull>>,
+        t4: PB15<Output<PushPull>>,
     }
 
     #[init(local = [usb_bus: Option<usb_device::bus::UsbBusAllocator<UsbBusType>> = None])]
@@ -124,6 +140,7 @@ mod app {
         );
 
         let clocks = rcc.clocks.clone();
+        let mut afio = ctx.device.AFIO.constrain(&mut rcc);
 
         defmt::info!("\tClocks: {}", defmt::Debug2Format(&clocks));
 
@@ -133,6 +150,7 @@ mod app {
         let dma_channels = ctx.device.DMA1.split(&mut rcc); // for defmt
 
         let mut gpioa = ctx.device.GPIOA.split(&mut rcc);
+        let mut gpiob = ctx.device.GPIOB.split(&mut rcc);
 
         let (usb_pull_up, usb_dp) = if let Some(usb_pull_up_lvl) = config::USB_PULLUP_UNACTVE_LEVEL
         {
@@ -200,6 +218,14 @@ mod app {
         defmt::info!("\tUSB");
 
         let adc_transfer = {
+            // use timer1 ch1 as external trigger for ADC
+            let ch1 = gpioa.pa8.into_alternate_push_pull(&mut gpioa.crh);
+            let mut pwm = stm32f1xx_hal::timer::Timer::new(ctx.device.TIM1, &mut rcc)
+                .pwm_hz(ch1, &mut afio.mapr, config::DISCRETISATION_RATE.Hz())
+                .split();
+            pwm.set_duty(pwm.get_max_duty() / 2); // 50% duty cycle
+            pwm.enable();
+
             let mut adc_rx_ch = gpioa.pa0.into_analog(&mut gpioa.crl);
             let mut adc_v_pll_ch = gpioa.pa1.into_analog(&mut gpioa.crl);
 
@@ -212,7 +238,7 @@ mod app {
             let pins = AdcPins(adc_rx_ch, adc_v_pll_ch);
 
             adc1.set_align(adc::Align::Right);
-            adc1.set_external_trigger(adc1::cr2::EXTSEL::Swstart);
+            adc1.set_external_trigger(adc1::cr2::EXTSEL::Tim1cc1);
 
             let mut dma_ch1 = dma_channels.1;
             dma_ch1.listen(stm32f1xx_hal::dma::Event::HalfTransfer);
@@ -232,9 +258,10 @@ mod app {
 
         defmt::info!("\tADC");
 
-        let sample_buffer = heapless::Vec::<u8, AUDIO_EP_SIZE_MAX>::new();
-
-        defmt::info!("Buffers ready");
+        let mut t1 = gpiob.pb12.into_push_pull_output(&mut gpiob.crh);
+        let mut t2 = gpiob.pb13.into_push_pull_output(&mut gpiob.crh);
+        let mut t3 = gpiob.pb14.into_push_pull_output(&mut gpiob.crh);
+        let mut t4 = gpiob.pb15.into_push_pull_output(&mut gpiob.crh);
 
         //---------------------------------------------------------------------
 
@@ -251,71 +278,77 @@ mod app {
 
         (
             Shared {
-                sample_buffer,
                 usb_audio,
                 usb_device: usb_dev,
             },
-            Local { adc_transfer },
+            Local {
+                adc_transfer,
+                t1,
+                t2,
+                t3,
+                t4,
+            },
         )
     }
 
     //-------------------------------------------------------------------------
 
-    #[task(binds = USB_HP_CAN_TX, shared = [usb_device, usb_audio, sample_buffer], priority = 4)]
+    #[task(binds = USB_HP_CAN_TX, shared = [usb_device, usb_audio], local = [t1], priority = 4)]
     fn usb_tx(ctx: usb_tx::Context) {
         let usb_device = ctx.shared.usb_device;
         let usb_audio = ctx.shared.usb_audio;
-        let sample_buffer = ctx.shared.sample_buffer;
+        let t1 = ctx.local.t1;
 
-        (usb_device, usb_audio, sample_buffer).lock(|usb_device, usb_audio, sample_buffer| {
-            usb_poll(usb_device, usb_audio, sample_buffer);
-        });
+        t1.set_high();
+        (usb_device, usb_audio).lock(|usb_device, usb_audio| usb_device.poll(&mut [usb_audio]));
+        t1.set_low();
     }
 
-    #[task(binds = USB_LP_CAN_RX0, shared = [usb_device, usb_audio, sample_buffer], priority = 4)]
+    #[task(binds = USB_LP_CAN_RX0, shared = [usb_device, usb_audio], local = [t2], priority = 4)]
     fn usb_rx0(ctx: usb_rx0::Context) {
         let usb_device = ctx.shared.usb_device;
         let usb_audio = ctx.shared.usb_audio;
-        let sample_buffer = ctx.shared.sample_buffer;
+        let t2 = ctx.local.t2;
 
-        (usb_device, usb_audio, sample_buffer).lock(|usb_device, usb_audio, sample_buffer| {
-            usb_poll(usb_device, usb_audio, sample_buffer);
-        });
+        t2.set_high();
+        (usb_device, usb_audio).lock(|usb_device, usb_audio| usb_device.poll(&mut [usb_audio]));
+        t2.set_low();
     }
 
-    fn usb_poll<B: usb_device::bus::UsbBus>(
-        usb_device: &mut UsbDevice<'static, B>,
-        usb_audio: &mut usbd_audio::AudioClass<'static, B>,
-        sample_buffer: &mut heapless::Vec<u8, AUDIO_EP_SIZE_MAX>,
-    ) {
-        let send_buf = if sample_buffer.is_empty() {
-            [0, 0, 0, 0].as_slice() // получив это, хост следующий опрос устройство зажержит на ~4 мс.
-        } else {
-            sample_buffer.as_slice()
-        };
-
-        if usb_audio.write(send_buf).is_ok() || sample_buffer.is_full() {
-            sample_buffer.clear();
-        }
-
-        usb_device.poll(&mut [usb_audio]);
-    }
-
-    #[task(binds = DMA1_CHANNEL1, shared = [sample_buffer], local = [adc_transfer], priority = 2)]
+    #[task(binds = DMA1_CHANNEL1, shared = [usb_audio], local = [adc_transfer, t3, t4], priority = 2)]
     fn adc_dma_half_complete(ctx: adc_dma_half_complete::Context) {
-        let mut sample_buffer = ctx.shared.sample_buffer;
+        let mut usbd_audio = ctx.shared.usb_audio;
+
         let adc_transfer = ctx.local.adc_transfer;
+        let t3 = ctx.local.t3;
+        let t4 = ctx.local.t4;
 
-        let result = sample_buffer.lock(|sample_buffer| {
-            adc_transfer.peek(|buff, _half| {
-                sample_buffer.extend_from_slice(unsafe {
-                    core::slice::from_raw_parts(buff.as_ptr() as *const u8, buff.len())
-                })
-            })
-        });
-
-        match result {
-            Ok(Err(_)) => rtic::pend(Interrupt::USB_HP_CAN_TX),
+        match adc_transfer.peek(|buff, _half| unsafe {
+            /*
+            core::slice::from_raw_parts(
+                buff.as_ptr() as *const u8,
+                buff.len() * core::mem::size_of::<u16>(),
+            )
+            */
+            core::slice::from_raw_parts(
+                TEST_TABLE.as_ptr() as *const u8,
+                TEST_TABLE.len() * core::mem::size_of::<i16>(),
+            )
+        }) {
+            Ok(data_ptr) => {
+                match usbd_audio.lock(move |usbd_audio| {
+                    usbd_audio.write(data_ptr)
+                }) {
+                    Ok(_n) => {
+                        t4.set_high();
+                        t4.set_low();
+                    }
+                    Err(e) => {
+                        t3.set_high();
+                        t3.set_low();
+                    }
+                }
+            }
             Err(e) => {
                 defmt::error!("ADC DMA irq error: {}", defmt::Debug2Format(&e));
                 unsafe {
@@ -329,7 +362,6 @@ mod app {
                     core::mem::forget(new_transfer);
                 }
             }
-            _ => (),
         }
     }
 }

@@ -7,5 +7,5 @@
     "rust-analyzer.cargo.target": "thumbv7m-none-eabi",
     "rust-analyzer.check.allTargets": false,
     "rust-analyzer.cargo.features": [],
-    "cortex-debug.variableUseNaturalFormat": true
+    "cortex-debug.variableUseNaturalFormat": false
 }

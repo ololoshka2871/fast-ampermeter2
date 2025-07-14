@@ -187,7 +187,7 @@ mod app {
         let usb_bus = ctx.local.usb_bus.as_ref().unwrap();
 
         let usb_audio = {
-            use drivers::AudioStreamConfigExt;
+            //use drivers::AudioStreamConfigExt;
 
             usbd_audio::AudioClassBuilder::new()
                 .input(
@@ -199,7 +199,7 @@ mod app {
                         usbd_audio::TerminalType::ExtLineConnector,
                     )
                     .unwrap()
-                    .set_ep_size(AUDIO_EP_SIZE_MAX as u16), // это костыль!
+                    //.set_ep_size(AUDIO_EP_SIZE_MAX as u16), // это костыль!
                 )
                 .build(usb_bus)
                 .unwrap()
@@ -237,7 +237,7 @@ mod app {
 
             let pins = AdcPins(adc_rx_ch, adc_v_pll_ch);
 
-            adc1.set_align(adc::Align::Right);
+            adc1.set_align(adc::Align::Left);
             adc1.set_external_trigger(adc1::cr2::EXTSEL::Tim1cc1);
 
             let mut dma_ch1 = dma_channels.1;
@@ -315,35 +315,48 @@ mod app {
         t2.set_low();
     }
 
-    #[task(binds = DMA1_CHANNEL1, shared = [usb_audio], local = [adc_transfer, t3, t4], priority = 2)]
+    #[task(binds = DMA1_CHANNEL1, shared = [usb_audio], local = [adc_transfer, t3, t4, counter:u32 = 0], priority = 2)]
     fn adc_dma_half_complete(ctx: adc_dma_half_complete::Context) {
         let mut usbd_audio = ctx.shared.usb_audio;
 
         let adc_transfer = ctx.local.adc_transfer;
         let t3 = ctx.local.t3;
         let t4 = ctx.local.t4;
+        let counter = ctx.local.counter;
 
         match adc_transfer.peek(|buff, _half| unsafe {
-            /*
-            core::slice::from_raw_parts(
-                buff.as_ptr() as *const u8,
-                buff.len() * core::mem::size_of::<u16>(),
-            )
-            */
-            core::slice::from_raw_parts(
-                TEST_TABLE.as_ptr() as *const u8,
-                TEST_TABLE.len() * core::mem::size_of::<i16>(),
-            )
+            core::slice::from_raw_parts(buff.as_ptr(), buff.len())
+            
+            //*counter = counter.wrapping_add(1);
+            //if *counter & 1 == 1 {
+            //    TEST_TABLE.as_slice()
+            //} else {
+            //    &[0i16; TEST_TABLE.len()]
+            //}
         }) {
             Ok(data_ptr) => {
+                let mut swap_endian = heapless::Vec::<u8, {TEST_TABLE.len() * core::mem::size_of::<i16>()}>::new();
+
+                for d in data_ptr.iter() {
+                    let bytes = d.to_le_bytes();
+                    swap_endian.push(bytes[0]).unwrap();
+                    swap_endian.push(bytes[1]).unwrap();
+                }
+
                 match usbd_audio.lock(move |usbd_audio| {
-                    usbd_audio.write(data_ptr)
+                    usbd_audio.input_alt_setting().and_then(move |s| {
+                        if s == 1 {
+                            usbd_audio.write(&swap_endian)
+                        } else {
+                            Err(usbd_audio::Error::StreamNotInitialized)
+                        }
+                    })
                 }) {
                     Ok(_n) => {
                         t4.set_high();
                         t4.set_low();
                     }
-                    Err(e) => {
+                    Err(_e) => {
                         t3.set_high();
                         t3.set_low();
                     }

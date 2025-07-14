@@ -71,3 +71,7 @@ stm32f103 = [
     "stm32-device-signature/stm32f1",
     "rtic/thumbv7-backend",
 ]
+
+[patch.crates-io]
+# USB isochronous support fixes
+stm32-usbd = { path = "../stm32-usbd" }

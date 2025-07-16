@@ -45,17 +45,6 @@ const AUDIO_EP_SIZE: usize =
     utils::ep_size(usbd_audio::Format::S16le, 2, config::DISCRETISATION_RATE); // 44 семпла -> 176 байт
 const AUDIO_EP_SIZE_MAX: usize = AUDIO_EP_SIZE * 2;
 
-const TEST_TABLE: [i16; 96] = [
-    0, 32700, 4268, 32420, 8463, 31586, 12514, 30211, 16350, 28319, 19906, 25943, 23122, 23122,
-    25943, 19906, 28319, 16350, 30211, 12514, 31586, 8463, 32420, 4268, 32700, 0, 32420, -4268,
-    31586, -8463, 30211, -12514, 28319, -16350, 25943, -19906, 23122, -23122, 19906, -25943, 16350,
-    -28319, 12514, -30211, 8463, -31586, 4268, -32420, 0, -32700, -4268, -32420, -8463, -31586,
-    -12514, -30211, -16350, -28319, -19906, -25943, -23122, -23122, -25943, -19906, -28319, -16350,
-    -30211, -12514, -31586, -8463, -32420, -4268, -32700, 0, -32420, 4268, -31586, 8463, -30211,
-    12514, -28319, 16350, -25943, 19906, -23122, 23122, -19906, 25943, -16350, 28319, -12514,
-    30211, -8463, 31586, -4268, 32420,
-];
-
 pub struct AdcPins<const MS: usize>(PA0<Analog>, PA1<Analog>);
 
 impl<const MS: usize> AdcPins<MS> {
@@ -218,7 +207,7 @@ mod app {
             // use timer1 ch1 as external trigger for ADC
             let ch1 = gpioa.pa8.into_alternate_push_pull(&mut gpioa.crh);
             let mut pwm = stm32f1xx_hal::timer::Timer::new(ctx.device.TIM1, &mut rcc)
-                .pwm_hz(ch1, &mut afio.mapr, (config::DISCRETISATION_RATE).Hz())
+                .pwm_hz(ch1, &mut afio.mapr, config::DISCRETISATION_RATE.Hz())
                 .split();
             pwm.set_duty(pwm.get_max_duty() / 2); // 50% duty cycle
             pwm.enable();
@@ -274,9 +263,7 @@ mod app {
                 usb_device: usb_dev,
                 tx_buff: circular_buffer::CircularBuffer::new(),
             },
-            Local {
-                adc_transfer,
-            },
+            Local { adc_transfer },
         )
     }
 
@@ -287,14 +274,16 @@ mod app {
         let usb_device = ctx.shared.usb_device;
         let mut usb_audio = ctx.shared.usb_audio;
         let tx_buff = ctx.shared.tx_buff;
-        
-        (usb_device, &mut usb_audio).lock(|usb_device, usb_audio| usb_device.poll(&mut [usb_audio]));
-        
+
+        (usb_device, &mut usb_audio)
+            .lock(|usb_device, usb_audio| usb_device.poll(&mut [usb_audio]));
+
         (tx_buff, &mut usb_audio).lock(move |tx_buff, usb_audio| {
             if let Ok(1) = usb_audio.input_alt_setting() {
-                let mut buff = heapless::Vec::<u8, AUDIO_EP_SIZE_MAX>::new();
-                tx_buff.iter().take(AUDIO_EP_SIZE_MAX).collect_into(&mut buff);
-                let _ = usb_audio.write(&buff);
+                let buff = tx_buff.make_contiguous();
+                let _w = usb_audio.write(&buff);
+                tx_buff.clear();
+                defmt::debug!("USBTX: {}", defmt::Debug2Format(&_w));
             }
         });
     }
@@ -307,18 +296,17 @@ mod app {
         (usb_device, usb_audio).lock(|usb_device, usb_audio| usb_device.poll(&mut [usb_audio]));
     }
 
-    #[task(binds = DMA1_CHANNEL1, shared = [tx_buff], local = [adc_transfer, counter:u32 = 0], priority = 2)]
+    #[task(binds = DMA1_CHANNEL1, shared = [tx_buff], local = [adc_transfer], priority = 2)]
     fn adc_dma_half_complete(ctx: adc_dma_half_complete::Context) {
         let mut tx_buff = ctx.shared.tx_buff;
 
         let adc_transfer = ctx.local.adc_transfer;
-        let counter = ctx.local.counter;
 
         fn try_push_value<'a, const N: usize>(
             dest: &mut circular_buffer::CircularBuffer<N, u8>,
-            value: &'a [i16],
-        ) -> Result<(), &'a [i16]> {
-            if dest.capacity() - dest.len() < value.len() * core::mem::size_of::<i16>() {
+            value: &'a [u16],
+        ) -> Result<(), &'a [u16]> {
+            if dest.capacity() - dest.len() < value.len() * core::mem::size_of::<u16>() {
                 Err(value)
             } else {
                 for v in value {
@@ -331,17 +319,11 @@ mod app {
             }
         }
 
-        match adc_transfer.peek(|buff, _half| unsafe {
-            //core::slice::from_raw_parts(buff.as_ptr(), buff.len());
-
-            //*counter = counter.wrapping_add(1);
-            if *counter & 1 == 0 {
-                TEST_TABLE.as_slice()
-            } else {
-                &[0i16; TEST_TABLE.len()]
-            }
-        }) {
+        match adc_transfer
+            .peek(|buff, _half| unsafe { core::slice::from_raw_parts(buff.as_ptr(), buff.len()) })
+        {
             Ok(data_ptr) => {
+                defmt::debug!("ADC {} samples ready", data_ptr.len());
                 tx_buff.lock(move |tx_buff| {
                     for d in data_ptr.chunks_exact(2) {
                         if let Err(_) = try_push_value(tx_buff, d) {

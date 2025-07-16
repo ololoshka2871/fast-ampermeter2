@@ -2,6 +2,7 @@
 #![no_std]
 #![feature(macro_metavar_expr)]
 #![feature(alloc_error_handler)]
+#![feature(iter_collect_into)]
 
 mod config;
 mod drivers;
@@ -15,7 +16,7 @@ use stm32f1xx_hal::adc::{self, Adc, AdcPayload, ChannelTimeSequence, SampleTime,
 use stm32f1xx_hal::afio::AfioExt;
 use stm32f1xx_hal::dma::{CircBuffer, CircReadDma, DmaExt, RxDma};
 use stm32f1xx_hal::flash::FlashExt;
-use stm32f1xx_hal::gpio::{Analog, GpioExt, Output, PushPull, PA0, PA1, PB12, PB13, PB14, PB15};
+use stm32f1xx_hal::gpio::{Analog, GpioExt, PA0, PA1};
 
 use stm32f1xx_hal::pac::{adc1, ADC1};
 use stm32f1xx_hal::rcc::RccExt;
@@ -110,15 +111,12 @@ mod app {
     struct Shared {
         usb_audio: usbd_audio::AudioClass<'static, UsbBus<Peripheral>>,
         usb_device: UsbDevice<'static, UsbBusType>,
+        tx_buff: circular_buffer::CircularBuffer<AUDIO_EP_SIZE_MAX, u8>,
     }
 
     #[local]
     struct Local {
         adc_transfer: AdcTransferBuffer,
-        t1: PB12<Output<PushPull>>,
-        t2: PB13<Output<PushPull>>,
-        t3: PB14<Output<PushPull>>,
-        t4: PB15<Output<PushPull>>,
     }
 
     #[init(local = [usb_bus: Option<usb_device::bus::UsbBusAllocator<UsbBusType>> = None])]
@@ -150,7 +148,6 @@ mod app {
         let dma_channels = ctx.device.DMA1.split(&mut rcc); // for defmt
 
         let mut gpioa = ctx.device.GPIOA.split(&mut rcc);
-        let mut gpiob = ctx.device.GPIOB.split(&mut rcc);
 
         let (usb_pull_up, usb_dp) = if let Some(usb_pull_up_lvl) = config::USB_PULLUP_UNACTVE_LEVEL
         {
@@ -187,7 +184,7 @@ mod app {
         let usb_bus = ctx.local.usb_bus.as_ref().unwrap();
 
         let usb_audio = {
-            //use drivers::AudioStreamConfigExt;
+            use drivers::AudioStreamConfigExt;
 
             usbd_audio::AudioClassBuilder::new()
                 .input(
@@ -199,7 +196,7 @@ mod app {
                         usbd_audio::TerminalType::ExtLineConnector,
                     )
                     .unwrap()
-                    //.set_ep_size(AUDIO_EP_SIZE_MAX as u16), // это костыль!
+                    .set_ep_size(AUDIO_EP_SIZE_MAX as u16), // это костыль!
                 )
                 .build(usb_bus)
                 .unwrap()
@@ -221,7 +218,7 @@ mod app {
             // use timer1 ch1 as external trigger for ADC
             let ch1 = gpioa.pa8.into_alternate_push_pull(&mut gpioa.crh);
             let mut pwm = stm32f1xx_hal::timer::Timer::new(ctx.device.TIM1, &mut rcc)
-                .pwm_hz(ch1, &mut afio.mapr, config::DISCRETISATION_RATE.Hz())
+                .pwm_hz(ch1, &mut afio.mapr, (config::DISCRETISATION_RATE).Hz())
                 .split();
             pwm.set_duty(pwm.get_max_duty() / 2); // 50% duty cycle
             pwm.enable();
@@ -258,11 +255,6 @@ mod app {
 
         defmt::info!("\tADC");
 
-        let mut t1 = gpiob.pb12.into_push_pull_output(&mut gpiob.crh);
-        let mut t2 = gpiob.pb13.into_push_pull_output(&mut gpiob.crh);
-        let mut t3 = gpiob.pb14.into_push_pull_output(&mut gpiob.crh);
-        let mut t4 = gpiob.pb15.into_push_pull_output(&mut gpiob.crh);
-
         //---------------------------------------------------------------------
 
         if let Some(mut usb_pull_up) = usb_pull_up {
@@ -280,87 +272,83 @@ mod app {
             Shared {
                 usb_audio,
                 usb_device: usb_dev,
+                tx_buff: circular_buffer::CircularBuffer::new(),
             },
             Local {
                 adc_transfer,
-                t1,
-                t2,
-                t3,
-                t4,
             },
         )
     }
 
     //-------------------------------------------------------------------------
 
-    #[task(binds = USB_HP_CAN_TX, shared = [usb_device, usb_audio], local = [t1], priority = 4)]
+    #[task(binds = USB_HP_CAN_TX, shared = [usb_device, usb_audio, tx_buff], priority = 4)]
     fn usb_tx(ctx: usb_tx::Context) {
         let usb_device = ctx.shared.usb_device;
-        let usb_audio = ctx.shared.usb_audio;
-        let t1 = ctx.local.t1;
-
-        t1.set_high();
-        (usb_device, usb_audio).lock(|usb_device, usb_audio| usb_device.poll(&mut [usb_audio]));
-        t1.set_low();
+        let mut usb_audio = ctx.shared.usb_audio;
+        let tx_buff = ctx.shared.tx_buff;
+        
+        (usb_device, &mut usb_audio).lock(|usb_device, usb_audio| usb_device.poll(&mut [usb_audio]));
+        
+        (tx_buff, &mut usb_audio).lock(move |tx_buff, usb_audio| {
+            if let Ok(1) = usb_audio.input_alt_setting() {
+                let mut buff = heapless::Vec::<u8, AUDIO_EP_SIZE_MAX>::new();
+                tx_buff.iter().take(AUDIO_EP_SIZE_MAX).collect_into(&mut buff);
+                let _ = usb_audio.write(&buff);
+            }
+        });
     }
 
-    #[task(binds = USB_LP_CAN_RX0, shared = [usb_device, usb_audio], local = [t2], priority = 4)]
+    #[task(binds = USB_LP_CAN_RX0, shared = [usb_device, usb_audio], priority = 4)]
     fn usb_rx0(ctx: usb_rx0::Context) {
         let usb_device = ctx.shared.usb_device;
         let usb_audio = ctx.shared.usb_audio;
-        let t2 = ctx.local.t2;
 
-        t2.set_high();
         (usb_device, usb_audio).lock(|usb_device, usb_audio| usb_device.poll(&mut [usb_audio]));
-        t2.set_low();
     }
 
-    #[task(binds = DMA1_CHANNEL1, shared = [usb_audio], local = [adc_transfer, t3, t4, counter:u32 = 0], priority = 2)]
+    #[task(binds = DMA1_CHANNEL1, shared = [tx_buff], local = [adc_transfer, counter:u32 = 0], priority = 2)]
     fn adc_dma_half_complete(ctx: adc_dma_half_complete::Context) {
-        let mut usbd_audio = ctx.shared.usb_audio;
+        let mut tx_buff = ctx.shared.tx_buff;
 
         let adc_transfer = ctx.local.adc_transfer;
-        let t3 = ctx.local.t3;
-        let t4 = ctx.local.t4;
         let counter = ctx.local.counter;
 
+        fn try_push_value<'a, const N: usize>(
+            dest: &mut circular_buffer::CircularBuffer<N, u8>,
+            value: &'a [i16],
+        ) -> Result<(), &'a [i16]> {
+            if dest.capacity() - dest.len() < value.len() * core::mem::size_of::<i16>() {
+                Err(value)
+            } else {
+                for v in value {
+                    let v = v.to_le_bytes();
+                    dest.push_back(v[0]);
+                    dest.push_back(v[1]);
+                }
+
+                Ok(())
+            }
+        }
+
         match adc_transfer.peek(|buff, _half| unsafe {
-            core::slice::from_raw_parts(buff.as_ptr(), buff.len())
-            
+            //core::slice::from_raw_parts(buff.as_ptr(), buff.len());
+
             //*counter = counter.wrapping_add(1);
-            //if *counter & 1 == 1 {
-            //    TEST_TABLE.as_slice()
-            //} else {
-            //    &[0i16; TEST_TABLE.len()]
-            //}
+            if *counter & 1 == 0 {
+                TEST_TABLE.as_slice()
+            } else {
+                &[0i16; TEST_TABLE.len()]
+            }
         }) {
             Ok(data_ptr) => {
-                let mut swap_endian = heapless::Vec::<u8, {TEST_TABLE.len() * core::mem::size_of::<i16>()}>::new();
-
-                for d in data_ptr.iter() {
-                    let bytes = d.to_le_bytes();
-                    swap_endian.push(bytes[0]).unwrap();
-                    swap_endian.push(bytes[1]).unwrap();
-                }
-
-                match usbd_audio.lock(move |usbd_audio| {
-                    usbd_audio.input_alt_setting().and_then(move |s| {
-                        if s == 1 {
-                            usbd_audio.write(&swap_endian)
-                        } else {
-                            Err(usbd_audio::Error::StreamNotInitialized)
+                tx_buff.lock(move |tx_buff| {
+                    for d in data_ptr.chunks_exact(2) {
+                        if let Err(_) = try_push_value(tx_buff, d) {
+                            break;
                         }
-                    })
-                }) {
-                    Ok(_n) => {
-                        t4.set_high();
-                        t4.set_low();
                     }
-                    Err(_e) => {
-                        t3.set_high();
-                        t3.set_low();
-                    }
-                }
+                });
             }
             Err(e) => {
                 defmt::error!("ADC DMA irq error: {}", defmt::Debug2Format(&e));

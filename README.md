@@ -3,6 +3,8 @@
 
 ## Железо
 Адаптировано для производства методом ЛУТ на одностороннем тектолите, требуется сзелать 3 проволочные перемычки на обратной стороне платы.
+![](hardware/photo1.jpg)
+![](hardware/photo2.jpg)
 - [Схема](hardware/scematic.pdf)
 - [Плата](hardware/LUT-print.pdf)
 - [Gerber](hardware/Gerber.zip)

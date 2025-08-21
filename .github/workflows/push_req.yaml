@@ -26,6 +26,8 @@ jobs:
           submodules: recursive
 
       - name: Build
+        env: 
+          RUSTC_BOOTSTRAP: 1
         run: cargo build --release   
 
       - name: Create binary

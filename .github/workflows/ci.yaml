@@ -1,0 +1,47 @@
+name: Build
+
+on: 
+  push: 
+    tags:
+      - v*
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install compiler
+        run: rustup target add thumbv7em-none-eabihf
+
+      - name: Install flip-link
+        run: cargo install flip-link@0.1.9
+
+      - name: Install tools
+        run: |
+          cargo install cargo-binutils
+
+      - name: Clone
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Generate files
+        run: |
+          run: rust-objcopy -O binary target/thumbv7m-none-eabi/release/fast-ampermeter2 fast-ampermeter2.bin
+
+      - uses: SebRollen/toml-action@v1.2.0
+        id: read_version
+        with:
+          file: 'firmware/Cargo.toml'
+          field: 'package.version'
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ steps.read_version.outputs.value }}
+          body: This is an automatic ${{ steps.read_version.outputs.value }} release!
+          prerelease: true
+          files: |
+            fast-ampermeter2.bin      

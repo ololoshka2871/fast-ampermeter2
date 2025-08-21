@@ -1,0 +1,32 @@
+name: Push Request Workflow
+on:
+  pull_request:
+    types: [opened, synchronize]
+    branches:
+      - 'master'
+      - '*/*'
+
+jobs:
+  build-windows:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install compiler
+        run: rustup target add thumbv7em-none-eabihf
+
+      - name: Install flip-link
+        run: cargo install flip-link@0.1.9
+
+      - name: Install tools
+        run: |
+          cargo install cargo-binutils
+
+      - name: Clone
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build
+        run: cargo build --release   
+
+      - name: Create binary
+        run: rust-objcopy -O binary target/thumbv7m-none-eabi/release/fast-ampermeter2 fast-ampermeter2.bin

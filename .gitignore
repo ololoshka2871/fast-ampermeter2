@@ -15,8 +15,7 @@ target/
 
 # doc
 *.pdf
-!GTK32A_maket.pdf
-!logic.pdf
+!hardware/*.pdf
 
 # gen
 test/protocol_pb2.py

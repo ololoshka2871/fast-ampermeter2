@@ -69,4 +69,4 @@ stm32f103 = [
 
 [patch.crates-io]
 # USB isochronous support fixes
-stm32-usbd = { path = "../stm32-usbd" }
+stm32-usbd = { git = "https://github.com/ololoshka2871/stm32-usbd.git", rev = "a195bd5f52" }

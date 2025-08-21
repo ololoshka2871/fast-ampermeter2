@@ -6,25 +6,14 @@ on:
       - master
       - "*/*"
 
-# Caching proxy
 env:
-  http_proxy: ${{ vars.HTTP_PROXY }} 
-  https_proxy: ${{ vars.HTTP_PROXY }} 
+   GIT_SSL_NO_VERIFY: true
+   NODE_TLS_REJECT_UNAUTHORIZED: 0
 
 jobs:
   build:
     runs-on: rust-stm32
     steps:
-      - name: Install root certificate
-        run: |
-          mkdir -p /usr/share/ca-certificates/extra
-          echo "${{ vars.SCTB_ROOT_CERT }}" > /usr/share/ca-certificates/extra/sctb.crt
-          echo "extra/sctb.crt" >> /etc/ca-certificates.conf
-          update-ca-certificates
-
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v3
-
       - name: Install flip-link
         run: cargo install flip-link@0.1.9
       
@@ -33,8 +22,6 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Build different features
+      - name: Build
         run: |
           cargo build --release
-          cargo build --release --features "auto-pll"
-          cargo build --release --features "auto-pll,display"

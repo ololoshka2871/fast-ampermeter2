@@ -5,26 +5,14 @@ on:
     tags:
       - v*
 
-# Caching proxy
 env:
-  http_proxy: ${{ vars.HTTP_PROXY }} 
-  https_proxy: ${{ vars.HTTP_PROXY }} 
-  NODE_TLS_REJECT_UNAUTHORIZED: 0
+   GIT_SSL_NO_VERIFY: true
+   NODE_TLS_REJECT_UNAUTHORIZED: 0
 
 jobs:
   build:
     runs-on: rust-stm32
     steps:
-      - name: Install root certificate
-        run: |
-          mkdir -p /usr/share/ca-certificates/extra
-          echo "${{ vars.SCTB_ROOT_CERT }}" > /usr/share/ca-certificates/extra/sctb.crt
-          echo "extra/sctb.crt" >> /etc/ca-certificates.conf
-          update-ca-certificates
-
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v3
-
       - name: Install flip-link
         run: cargo install flip-link@0.1.9
 
@@ -33,23 +21,11 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Build Normal
+      - name: Build
         run: cargo build --release
 
-      - name: Create binary dist for normal
-        run: arm-none-eabi-objcopy -O binary target/thumbv7m-none-eabi/release/rk-meter-agc-pll rk-meter-agc-pll-normal.bin
-
-      - name: Build AutoPll
-        run: cargo build --release --features "auto-pll"
-
-      - name: Create binary dist for AutoPll
-        run: arm-none-eabi-objcopy -O binary target/thumbv7m-none-eabi/release/rk-meter-agc-pll rk-meter-agc-pll-auto-pll.bin
-
-      - name: Build AutoPll+Display
-        run: cargo build --release --features "auto-pll,display"
-
-      - name: Create binary dist for AutoPll+Display
-        run: arm-none-eabi-objcopy -O binary target/thumbv7m-none-eabi/release/rk-meter-agc-pll rk-meter-agc-pll-auto-pll-display.bin
+      - name: Create binary dist
+        run: arm-none-eabi-objcopy -O binary target/thumbv7m-none-eabi/release/fast-ampermeter2 fast-ampermeter2.bin
 
       - uses: SebRollen/toml-action@v1.2.0
         id: read_version
@@ -62,11 +38,6 @@ jobs:
           name: v${{ steps.read_version.outputs.value }}
           body: |
             This is an automatic ${{ steps.read_version.outputs.value }} release!
-            `rk-meter-agc-pll-normal.bin` - версия для устройств, под управлением ПК
-            `rk-meter-agc-pll-auto-pll.bin` - версия для автономных устройств, PLL включается сам после стабилизации частоты
-            `rk-meter-agc-pll-auto-pll-display.bin` - версия для автономных устройств c дисплеем
           prerelease: true
           files: |
-            rk-meter-agc-pll-normal.bin
-            rk-meter-agc-pll-auto-pll.bin
-            rk-meter-agc-pll-auto-pll-display.bin
+            fast-ampermeter2.bin

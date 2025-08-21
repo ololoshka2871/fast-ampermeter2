@@ -323,7 +323,7 @@ mod app {
             .peek(|buff, _half| unsafe { core::slice::from_raw_parts(buff.as_ptr(), buff.len()) })
         {
             Ok(data_ptr) => {
-                defmt::debug!("ADC {} samples ready", data_ptr.len());
+                defmt::trace!("ADC {} samples ready", data_ptr.len());
                 tx_buff.lock(move |tx_buff| {
                     for d in data_ptr.chunks_exact(2) {
                         if let Err(_) = try_push_value(tx_buff, d) {

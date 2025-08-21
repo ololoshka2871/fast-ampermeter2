@@ -60,4 +60,4 @@ rrb = "run --release --bin laser-setup"
 color = "always"
 
 [env]
-DEFMT_LOG = "trace"
+DEFMT_LOG = "debug"

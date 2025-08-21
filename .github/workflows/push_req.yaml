@@ -19,6 +19,7 @@ jobs:
       - name: Install tools
         run: |
           cargo install cargo-binutils
+          rustup component add llvm-tools
 
       - name: Clone
         uses: actions/checkout@v4

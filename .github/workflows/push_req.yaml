@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Install compiler
-        run: rustup target add thumbv7em-none-eabihf
+        run: rustup target add thumbv7m-none-eabi
 
       - name: Install flip-link
         run: cargo install flip-link@0.1.9
@@ -19,6 +19,7 @@ jobs:
       - name: Install tools
         run: |
           cargo install cargo-binutils
+          rustup component add llvm-tools
 
       - name: Clone
         uses: actions/checkout@v4
@@ -26,6 +27,8 @@ jobs:
           submodules: recursive
 
       - name: Build
+        env: 
+          RUSTC_BOOTSTRAP: 1
         run: cargo build --release   
 
       - name: Create binary

@@ -36,7 +36,7 @@ jobs:
       - uses: SebRollen/toml-action@v1.2.0
         id: read_version
         with:
-          file: 'firmware/Cargo.toml'
+          file: 'Cargo.toml'
           field: 'package.version'
 
       - name: Create release

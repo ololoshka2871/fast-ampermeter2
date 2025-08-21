@@ -31,8 +31,7 @@ jobs:
         run: cargo build --release
 
       - name: Generate files
-        run: |
-          run: rust-objcopy -O binary target/thumbv7m-none-eabi/release/fast-ampermeter2 fast-ampermeter2.bin
+        run: rust-objcopy -O binary target/thumbv7m-none-eabi/release/fast-ampermeter2 fast-ampermeter2.bin
 
       - uses: SebRollen/toml-action@v1.2.0
         id: read_version
